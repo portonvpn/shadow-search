@@ -1,5 +1,4 @@
-// api/search.js — No API key required. Scrapes DuckDuckGo HTML server-side.
-// Your Vercel server makes the request, so the user's IP is always hidden.
+// api/search.js — Uses DDG Lite beter fix
 
 module.exports = async function (req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -12,25 +11,37 @@ module.exports = async function (req, res) {
   if (!query) return res.status(400).json({ error: 'No query provided' });
 
   try {
-    // POST to DuckDuckGo's HTML-only version (same request a browser makes)
-    const ddgRes = await fetch('https://html.duckduckgo.com/html/', {
+    const ddgRes = await fetch('https://lite.duckduckgo.com/lite/', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept': 'text/html,application/xhtml+xml',
         'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://html.duckduckgo.com/'
+        'Origin': 'https://lite.duckduckgo.com',
+        'Referer': 'https://lite.duckduckgo.com/'
       },
-      body: `q=${encodeURIComponent(query)}&kl=us-en&df=`
+      body: `q=${encodeURIComponent(query)}&kl=us-en`
     });
 
     if (!ddgRes.ok) {
-      return res.status(502).json({ error: `DuckDuckGo returned ${ddgRes.status}` });
+      return res.status(502).json({ error: `DDG returned status ${ddgRes.status}` });
     }
 
     const html = await ddgRes.text();
-    const results = parseDDG(html);
+
+    // DEBUG: uncomment the next line temporarily if still no results
+    // return res.status(200).json({ debug: html.slice(0, 3000) });
+
+    const results = parseLite(html);
+
+    if (results.length === 0) {
+      // Return a snippet of raw HTML so you can see what DDG is sending back
+      return res.status(200).json({
+        results: [],
+        _debug: 'No results parsed. Raw HTML sample: ' + html.slice(0, 500)
+      });
+    }
 
     return res.status(200).json({ results });
 
@@ -40,42 +51,43 @@ module.exports = async function (req, res) {
   }
 };
 
-function parseDDG(html) {
-  // Extract result titles + URLs
-  // DDG HTML pattern: <a rel="nofollow" class="result__a" href="URL">TITLE</a>
-  const titleRe = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+function parseLite(html) {
+  const results = [];
 
-  // Extract descriptions
-  // DDG HTML pattern: <a class="result__snippet" ...>DESCRIPTION</a>
-  const snippetRe = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+  // DDG Lite HTML structure:
+  // <a class="result-link" href="URL">TITLE</a>
+  // <td class="result-snippet">DESCRIPTION</td>
 
-  const pairs = [];
+  // Step 1: get all result links (title + url)
+  const linkRe = /<a[^>]+class="result-link"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  // Step 2: get all snippets
+  const snippetRe = /<td[^>]+class="result-snippet"[^>]*>([\s\S]*?)<\/td>/gi;
+
+  const links = [];
   let m;
 
-  while ((m = titleRe.exec(html)) !== null) {
-    const url = m[1];
-    const title = stripTags(m[2]).trim();
-    // Skip DDG's own internal links
-    if (title && !url.includes('duckduckgo.com')) {
-      pairs.push({ url, title });
-    }
-    if (pairs.length >= 10) break;
+  while ((m = linkRe.exec(html)) !== null) {
+    links.push({
+      url: m[1].trim(),
+      title: clean(m[2])
+    });
+    if (links.length >= 10) break;
   }
 
   const snippets = [];
   while ((m = snippetRe.exec(html)) !== null) {
-    snippets.push(stripTags(m[1]).trim());
+    snippets.push(clean(m[1]));
     if (snippets.length >= 10) break;
   }
 
-  return pairs.map((p, i) => ({
-    title: p.title,
-    url: p.url,
+  return links.map((l, i) => ({
+    title: l.title,
+    url: l.url,
     description: snippets[i] || ''
   }));
 }
 
-function stripTags(str) {
+function clean(str) {
   return str
     .replace(/<[^>]+>/g, '')
     .replace(/&amp;/g, '&')
